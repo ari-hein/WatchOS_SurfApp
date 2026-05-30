@@ -5,6 +5,7 @@
 
 const SURFLINE_BASE = "https://services.surfline.com";
 const NOAA_BASE = "https://api.tidesandcurrents.noaa.gov/api/prod/datagetter";
+const SURFLINE_TOKEN = "e83605412d675903c0f723f4833bec6c07549870";
 
 // Browser-like headers to avoid Cloudflare 1020 on Surfline
 const FETCH_HEADERS = {
@@ -183,7 +184,7 @@ function htmlEscape(str) {
 // ============================================================
 
 async function getSurflineSpotId(query) {
-  const url = `${SURFLINE_BASE}/search/site?q=${encodeURIComponent(query)}&querySize=5&suggestionSize=0`;
+  const url = `${SURFLINE_BASE}/search/site?q=${encodeURIComponent(query)}&querySize=5&suggestionSize=0&accesstoken=${SURFLINE_TOKEN}`;
   const res = await fetch(url, { headers: FETCH_HEADERS });
   if (!res.ok) throw new Error(`Surfline search HTTP ${res.status}`);
   const data = await res.json();
@@ -195,21 +196,21 @@ async function getSurflineSpotId(query) {
 }
 
 async function getSurflineWave(spotId) {
-  const url = `${SURFLINE_BASE}/kbyg/spots/forecasts/wave?spotId=${spotId}&days=1&intervalHours=1`;
+  const url = `${SURFLINE_BASE}/kbyg/spots/forecasts/wave?spotId=${spotId}&days=1&intervalHours=1&accesstoken=${SURFLINE_TOKEN}`;
   const res = await fetch(url, { headers: FETCH_HEADERS });
   if (!res.ok) throw new Error(`Surfline wave HTTP ${res.status}`);
   return res.json();
 }
 
 async function getSurflineWind(spotId) {
-  const url = `${SURFLINE_BASE}/kbyg/spots/forecasts/wind?spotId=${spotId}&days=1&intervalHours=1`;
+  const url = `${SURFLINE_BASE}/kbyg/spots/forecasts/wind?spotId=${spotId}&days=1&intervalHours=1&accesstoken=${SURFLINE_TOKEN}`;
   const res = await fetch(url, { headers: FETCH_HEADERS });
   if (!res.ok) throw new Error(`Surfline wind HTTP ${res.status}`);
   return res.json();
 }
 
 async function getSurflineTides(spotId) {
-  const url = `${SURFLINE_BASE}/kbyg/spots/forecasts/tides?spotId=${spotId}&days=2`;
+  const url = `${SURFLINE_BASE}/kbyg/spots/forecasts/tides?spotId=${spotId}&days=2&accesstoken=${SURFLINE_TOKEN}`;
   const res = await fetch(url, { headers: FETCH_HEADERS });
   if (!res.ok) throw new Error(`Surfline tides HTTP ${res.status}`);
   return res.json();
