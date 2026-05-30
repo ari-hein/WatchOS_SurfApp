@@ -1,0 +1,7 @@
+name = "surf-watch"
+main = "worker.js"
+compatibility_date = "2024-04-01"
+
+# Free tier — no paid features required
+# Deploy: wrangler deploy
+# Dev:    wrangler dev
