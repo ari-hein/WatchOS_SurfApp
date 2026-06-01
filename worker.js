@@ -1,159 +1,119 @@
 // ============================================================
-// Surf Conditions Worker
-// Cloudflare Worker — plain HTML output for Apple Watch / Darock Browser
+// Surf Watch Worker
+// Cloudflare Worker — plain HTML for Apple Watch / Darock Browser
+// ============================================================
+// SETUP: Set SURFLINE_TOKEN as an encrypted environment variable.
+// Cloudflare Dashboard → Workers → surf-watch → Settings → Variables
+// Add variable: SURFLINE_TOKEN = <your token> — check "Encrypt"
+// ============================================================
+// DATA SOURCES:
+//   Surfline  → surf height (ft) + human size label (e.g. "head high")
+//   Open-Meteo Marine API → swell height, period, direction (free, no token)
+//   Open-Meteo Forecast API → wind speed, direction, gusts (free, no token)
+//   NOAA CO-OPS → water temperature + tide predictions (free, no token)
+//
+// Each source fails independently. Page always renders; failed fields → N/A.
 // ============================================================
 
 const SURFLINE_BASE = "https://services.surfline.com";
-const NOAA_BASE = "https://api.tidesandcurrents.noaa.gov/api/prod/datagetter";
-const SURFLINE_TOKEN = "e83605412d675903c0f723f4833bec6c07549870";
+const NOAA_BASE     = "https://api.tidesandcurrents.noaa.gov/api/prod/datagetter";
+const MARINE_BASE   = "https://marine-api.open-meteo.com/v1/marine";
+const WEATHER_BASE  = "https://api.open-meteo.com/v1/forecast";
 
-// Browser-like headers to avoid Cloudflare 1020 on Surfline
-const FETCH_HEADERS = {
-  "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-  "Accept": "application/json, text/plain, */*",
-  "Accept-Language": "en-US,en;q=0.9",
-  "Referer": "https://www.surfline.com/",
-  "Origin": "https://www.surfline.com",
+// Mirrors exact browser request headers from a confirmed Surfline 200 OK capture.
+// Reduces likelihood of Cloudflare bot-protection 403 on Surfline API.
+// Do NOT include accept-encoding — Cloudflare Workers handles that automatically.
+const SURFLINE_HEADERS = {
+  "accept":             "*/*",
+  "accept-language":    "en-US,en;q=0.9,zh-CN;q=0.8,zh;q=0.7,ja;q=0.6,id;q=0.5,es;q=0.4,de;q=0.3",
+  "cache-control":      "no-cache",
+  "dnt":                "1",
+  "origin":             "https://www.surfline.com",
+  "pragma":             "no-cache",
+  "priority":           "u=1, i",
+  "referer":            "https://www.surfline.com/",
+  "sec-ch-ua":          '"Opera";v="131", "Not.A/Brand";v="8", "Chromium";v="147"',
+  "sec-ch-ua-mobile":   "?0",
+  "sec-ch-ua-platform": '"Windows"',
+  "sec-fetch-dest":     "empty",
+  "sec-fetch-mode":     "cors",
+  "sec-fetch-site":     "same-site",
+  "user-agent":         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36 OPR/131.0.0.0",
 };
 
 // ============================================================
-// CA SPOT LIST
-// Format: { name, spotId, noaaStationId }
-// noaaStationId: nearest NOAA CO-OPS station for water temp + tides
+// Pre-production test spots — 10 OC / SD spots
+//
+// spotId:        Surfline spot identifier (from surfline.com/surf-report URLs)
+// lat / lon:     Coordinates for Open-Meteo Marine + Wind API calls
+// noaaStationId: Nearest NOAA CO-OPS station for water temp + tides
+//
+// Note on HB Dog Beach: Surfline does not have a dedicated "Dog Beach" spot.
+// "North HB Streets" (5842041f4e65fad6a77088ea) is the closest available spot.
+//
+// Note on Tourmaline: Surfline lists this break as "Old Man's at Tourmaline".
 // ============================================================
 const CA_SPOTS = [
-  // --- San Diego County ---
-  { name: "Border Field", spotId: "5842041f4e65fad6a7708905", noaaStationId: "9410230" },
-  { name: "Imperial Beach", spotId: "5842041f4e65fad6a7708906", noaaStationId: "9410230" },
-  { name: "Coronado Beach", spotId: "5842041f4e65fad6a7708907", noaaStationId: "9410230" },
-  { name: "Ocean Beach", spotId: "5842041f4e65fad6a7708908", noaaStationId: "9410230" },
-  { name: "Mission Beach", spotId: "5842041f4e65fad6a7708909", noaaStationId: "9410230" },
-  { name: "Pacific Beach", spotId: "5842041f4e65fad6a770890a", noaaStationId: "9410230" },
-  { name: "La Jolla Cove", spotId: "5842041f4e65fad6a770890b", noaaStationId: "9410230" },
-  { name: "Windansea", spotId: "5842041f4e65fad6a770890c", noaaStationId: "9410230" },
-  { name: "Big Rock", spotId: "5842041f4e65fad6a770890d", noaaStationId: "9410230" },
-  { name: "Blacks Beach", spotId: "5842041f4e65fad6a770890e", noaaStationId: "9410230" },
-  { name: "Torrey Pines", spotId: "5842041f4e65fad6a770890f", noaaStationId: "9410230" },
-  { name: "Del Mar", spotId: "5842041f4e65fad6a7708910", noaaStationId: "9410230" },
-  { name: "Solana Beach", spotId: "5842041f4e65fad6a7708911", noaaStationId: "9410230" },
-  { name: "Cardiff Reef", spotId: "5842041f4e65fad6a7708912", noaaStationId: "9410230" },
-  { name: "Swamis", spotId: "5842041f4e65fad6a7708913", noaaStationId: "9410230" },
-  { name: "Moonlight Beach", spotId: "5842041f4e65fad6a7708914", noaaStationId: "9410230" },
-  { name: "D Street", spotId: "5842041f4e65fad6a7708915", noaaStationId: "9410230" },
-  { name: "Grandview", spotId: "5842041f4e65fad6a7708916", noaaStationId: "9410230" },
-  { name: "Leucadia", spotId: "5842041f4e65fad6a7708917", noaaStationId: "9410230" },
-  { name: "Carlsbad", spotId: "5842041f4e65fad6a7708918", noaaStationId: "9410230" },
-  { name: "Oceanside", spotId: "5842041f4e65fad6a7708919", noaaStationId: "9410230" },
-
-  // --- Orange County ---
-  { name: "San Onofre", spotId: "5842041f4e65fad6a7708a00", noaaStationId: "9410660" },
-  { name: "Trestles - Lowers", spotId: "5842041f4e65fad6a7708a01", noaaStationId: "9410660" },
-  { name: "Trestles - Uppers", spotId: "5842041f4e65fad6a7708a02", noaaStationId: "9410660" },
-  { name: "San Clemente Pier", spotId: "5842041f4e65fad6a7708a03", noaaStationId: "9410660" },
-  { name: "Doheny", spotId: "5842041f4e65fad6a7708a04", noaaStationId: "9410660" },
-  { name: "Salt Creek", spotId: "5842041f4e65fad6a7708a05", noaaStationId: "9410660" },
-  { name: "Aliso Beach", spotId: "5842041f4e65fad6a7708a06", noaaStationId: "9410660" },
-  { name: "Brooks Street", spotId: "5842041f4e65fad6a7708a07", noaaStationId: "9410660" },
-  { name: "Thalia Street", spotId: "5842041f4e65fad6a7708a08", noaaStationId: "9410660" },
-  { name: "The Wedge", spotId: "5842041f4e65fad6a7708a09", noaaStationId: "9410660" },
-  { name: "Newport Beach", spotId: "5842041f4e65fad6a7708a0a", noaaStationId: "9410660" },
-  { name: "Huntington Beach Pier", spotId: "5842041f4e65fad6a7708a0b", noaaStationId: "9410660" },
-  { name: "Bolsa Chica", spotId: "5842041f4e65fad6a7708a0c", noaaStationId: "9410660" },
-  { name: "Seal Beach", spotId: "5842041f4e65fad6a7708a0d", noaaStationId: "9410660" },
-
-  // --- Los Angeles County ---
-  { name: "Long Beach", spotId: "5842041f4e65fad6a7708b00", noaaStationId: "9410660" },
-  { name: "Cabrillo Beach", spotId: "5842041f4e65fad6a7708b01", noaaStationId: "9410660" },
-  { name: "Rat Beach", spotId: "5842041f4e65fad6a7708b02", noaaStationId: "9410660" },
-  { name: "El Porto", spotId: "5842041f4e65fad6a7708b03", noaaStationId: "9410660" },
-  { name: "Manhattan Beach", spotId: "5842041f4e65fad6a7708b04", noaaStationId: "9410660" },
-  { name: "Hermosa Beach", spotId: "5842041f4e65fad6a7708b05", noaaStationId: "9410660" },
-  { name: "Redondo Beach", spotId: "5842041f4e65fad6a7708b06", noaaStationId: "9410660" },
-  { name: "Torrance Beach", spotId: "5842041f4e65fad6a7708b07", noaaStationId: "9410660" },
-  { name: "Venice Beach", spotId: "5842041f4e65fad6a7708b08", noaaStationId: "9410660" },
-  { name: "Santa Monica", spotId: "5842041f4e65fad6a7708b09", noaaStationId: "9410660" },
-  { name: "Malibu - Surfrider", spotId: "5842041f4e65fad6a7708b0a", noaaStationId: "9410660" },
-  { name: "Zuma Beach", spotId: "5842041f4e65fad6a7708b0b", noaaStationId: "9410660" },
-  { name: "Leo Carrillo", spotId: "5842041f4e65fad6a7708b0c", noaaStationId: "9410660" },
-
-  // --- Ventura County ---
-  { name: "Rincon", spotId: "5842041f4e65fad6a7708c00", noaaStationId: "9411340" },
-  { name: "Punta Gorda", spotId: "5842041f4e65fad6a7708c01", noaaStationId: "9411340" },
-  { name: "Ventura Pier", spotId: "5842041f4e65fad6a7708c02", noaaStationId: "9411340" },
-  { name: "C Street", spotId: "5842041f4e65fad6a7708c03", noaaStationId: "9411340" },
-  { name: "Oxnard", spotId: "5842041f4e65fad6a7708c04", noaaStationId: "9411340" },
-  { name: "Point Mugu", spotId: "5842041f4e65fad6a7708c05", noaaStationId: "9411340" },
-
-  // --- Santa Barbara County ---
-  { name: "Refugio", spotId: "5842041f4e65fad6a7708d00", noaaStationId: "9411340" },
-  { name: "El Capitan", spotId: "5842041f4e65fad6a7708d01", noaaStationId: "9411340" },
-  { name: "Goleta Beach", spotId: "5842041f4e65fad6a7708d02", noaaStationId: "9411340" },
-  { name: "Santa Barbara Harbor", spotId: "5842041f4e65fad6a7708d03", noaaStationId: "9411340" },
-  { name: "Leadbetter Beach", spotId: "5842041f4e65fad6a7708d04", noaaStationId: "9411340" },
-  { name: "Hammonds", spotId: "5842041f4e65fad6a7708d05", noaaStationId: "9411340" },
-  { name: "Rincon Point", spotId: "5842041f4e65fad6a7708d06", noaaStationId: "9411340" },
-
-  // --- San Luis Obispo County ---
-  { name: "Pismo Beach", spotId: "5842041f4e65fad6a7708e00", noaaStationId: "9412110" },
-  { name: "Shell Beach", spotId: "5842041f4e65fad6a7708e01", noaaStationId: "9412110" },
-  { name: "Avila Beach", spotId: "5842041f4e65fad6a7708e02", noaaStationId: "9412110" },
-  { name: "Morro Bay", spotId: "5842041f4e65fad6a7708e03", noaaStationId: "9412110" },
-  { name: "Cayucos", spotId: "5842041f4e65fad6a7708e04", noaaStationId: "9412110" },
-  { name: "San Simeon", spotId: "5842041f4e65fad6a7708e05", noaaStationId: "9412110" },
-
-  // --- Monterey / Santa Cruz County ---
-  { name: "Ragged Point", spotId: "5842041f4e65fad6a7708f00", noaaStationId: "9413450" },
-  { name: "Salmon Creek", spotId: "5842041f4e65fad6a7708f01", noaaStationId: "9413450" },
-  { name: "Bodega Bay", spotId: "5842041f4e65fad6a7708f02", noaaStationId: "9415020" },
-  { name: "Carmel Beach", spotId: "5842041f4e65fad6a7708f03", noaaStationId: "9413450" },
-  { name: "Asilomar", spotId: "5842041f4e65fad6a7708f04", noaaStationId: "9413450" },
-  { name: "Moss Landing", spotId: "5842041f4e65fad6a7708f05", noaaStationId: "9413450" },
-  { name: "Capitola", spotId: "5842041f4e65fad6a7708f06", noaaStationId: "9413450" },
-  { name: "Santa Cruz - Steamer Lane", spotId: "5842041f4e65fad6a7708814", noaaStationId: "9413450" },
-  { name: "Santa Cruz - Pleasure Point", spotId: "5842041f4e65fad6a7708815", noaaStationId: "9413450" },
-  { name: "Manresa", spotId: "5842041f4e65fad6a7708816", noaaStationId: "9413450" },
-
-  // --- San Mateo / San Francisco County ---
-  { name: "Waddell Creek", spotId: "5842041f4e65fad6a7709000", noaaStationId: "9414290" },
-  { name: "Scott Creek", spotId: "5842041f4e65fad6a7709001", noaaStationId: "9414290" },
-  { name: "Half Moon Bay - Mavericks", spotId: "5842041f4e65fad6a7709002", noaaStationId: "9414290" },
-  { name: "Half Moon Bay - Jetty", spotId: "5842041f4e65fad6a7709003", noaaStationId: "9414290" },
-  { name: "Pacifica - Linda Mar", spotId: "5842041f4e65fad6a7709004", noaaStationId: "9414290" },
-  { name: "Fort Funston", spotId: "5842041f4e65fad6a7709005", noaaStationId: "9414290" },
-  { name: "Ocean Beach SF", spotId: "5842041f4e65fad6a7709006", noaaStationId: "9414290" },
-  { name: "Baker Beach", spotId: "5842041f4e65fad6a7709007", noaaStationId: "9414290" },
-
-  // --- Marin / Sonoma / Mendocino County ---
-  { name: "Bolinas", spotId: "5842041f4e65fad6a7709100", noaaStationId: "9415020" },
-  { name: "Stinson Beach", spotId: "5842041f4e65fad6a7709101", noaaStationId: "9415020" },
-  { name: "Dillon Beach", spotId: "5842041f4e65fad6a7709102", noaaStationId: "9415020" },
-  { name: "Jenner", spotId: "5842041f4e65fad6a7709103", noaaStationId: "9415020" },
-  { name: "Fort Ross", spotId: "5842041f4e65fad6a7709104", noaaStationId: "9415020" },
-  { name: "Timber Cove", spotId: "5842041f4e65fad6a7709105", noaaStationId: "9415020" },
-  { name: "Salt Point", spotId: "5842041f4e65fad6a7709106", noaaStationId: "9415020" },
-  { name: "Gualala", spotId: "5842041f4e65fad6a7709107", noaaStationId: "9415020" },
-  { name: "Point Arena", spotId: "5842041f4e65fad6a7709108", noaaStationId: "9415020" },
-  { name: "Manchester Beach", spotId: "5842041f4e65fad6a7709109", noaaStationId: "9415020" },
-  { name: "Elk", spotId: "5842041f4e65fad6a770910a", noaaStationId: "9415020" },
-  { name: "Albion", spotId: "5842041f4e65fad6a770910b", noaaStationId: "9415020" },
-  { name: "Mendocino", spotId: "5842041f4e65fad6a770910c", noaaStationId: "9415020" },
-  { name: "Fort Bragg", spotId: "5842041f4e65fad6a770910d", noaaStationId: "9415020" },
-  { name: "MacKerricher", spotId: "5842041f4e65fad6a770910e", noaaStationId: "9415020" },
-  { name: "Westport", spotId: "5842041f4e65fad6a770910f", noaaStationId: "9415020" },
-
-  // --- Humboldt County ---
-  { name: "Shelter Cove", spotId: "5842041f4e65fad6a7709200", noaaStationId: "9418767" },
-  { name: "Arcata Bay", spotId: "5842041f4e65fad6a7709201", noaaStationId: "9418767" },
-  { name: "Eureka", spotId: "5842041f4e65fad6a7709202", noaaStationId: "9418767" },
-  { name: "Mad River", spotId: "5842041f4e65fad6a7709203", noaaStationId: "9418767" },
-  { name: "Trinidad", spotId: "5842041f4e65fad6a7709204", noaaStationId: "9418767" },
-  { name: "Moonstone Beach", spotId: "5842041f4e65fad6a7709205", noaaStationId: "9418767" },
-  { name: "Clam Beach", spotId: "5842041f4e65fad6a7709206", noaaStationId: "9418767" },
-
-  // --- Del Norte County ---
-  { name: "Crescent City", spotId: "5842041f4e65fad6a7709300", noaaStationId: "9419750" },
-  { name: "Enderts Beach", spotId: "5842041f4e65fad6a7709301", noaaStationId: "9419750" },
-  { name: "Smith River", spotId: "5842041f4e65fad6a7709302", noaaStationId: "9419750" },
+  {
+    name: "Blackies",
+    spotId: "584204204e65fad6a7709115",
+    lat: 33.6050, lon: -117.9270,
+    noaaStationId: "9410660",
+  },
+  {
+    name: "HB Pier Northside",
+    spotId: "5842041f4e65fad6a7708827",
+    lat: 33.6560, lon: -118.0060,
+    noaaStationId: "9410660",
+  },
+  {
+    name: "HB Cliffs",
+    spotId: "640a3f7c606c45fdf1b09880",
+    lat: 33.6370, lon: -118.0080,
+    noaaStationId: "9410660",
+  },
+  {
+    name: "HB Dog Beach",
+    spotId: "5842041f4e65fad6a77088ea",
+    lat: 33.6868, lon: -118.0393,
+    noaaStationId: "9410660",
+  },
+  {
+    name: "Bolsa Chica",
+    spotId: "5842041f4e65fad6a77088e8",
+    lat: 33.6956, lon: -118.0489,
+    noaaStationId: "9410660",
+  },
+  {
+    name: "Doheny",
+    spotId: "5842041f4e65fad6a77088d7",
+    lat: 33.4608, lon: -117.6781,
+    noaaStationId: "9410660",
+  },
+  {
+    name: "Trestles - Lowers",
+    spotId: "5842041f4e65fad6a770888a",
+    lat: 33.3897, lon: -117.5928,
+    noaaStationId: "9410660",
+  },
+  {
+    name: "San Onofre",
+    spotId: "584204204e65fad6a77099d4",
+    lat: 33.3750, lon: -117.5650,
+    noaaStationId: "9410660",
+  },
+  {
+    name: "Cardiff Reef",
+    spotId: "5842041f4e65fad6a77088b1",
+    lat: 33.0120, lon: -117.2790,
+    noaaStationId: "9410230",
+  },
+  {
+    name: "Tourmaline",
+    spotId: "5842041f4e65fad6a77088c4",
+    lat: 32.8042, lon: -117.2572,
+    noaaStationId: "9410230",
+  },
 ];
 
 // ============================================================
@@ -165,12 +125,6 @@ function degToCompass(deg) {
   return dirs[Math.round(deg / 22.5) % 16];
 }
 
-function fmtTime(ts) {
-  return new Date(ts * 1000).toLocaleTimeString("en-US", {
-    hour: "numeric", minute: "2-digit", hour12: true, timeZone: "America/Los_Angeles"
-  });
-}
-
 function htmlEscape(str) {
   return String(str)
     .replace(/&/g, "&amp;")
@@ -179,292 +133,394 @@ function htmlEscape(str) {
     .replace(/"/g, "&quot;");
 }
 
+function padNum(n) {
+  return String(n).padStart(2, "0");
+}
+
+function fmtDateStr(d) {
+  return `${d.getFullYear()}${padNum(d.getMonth() + 1)}${padNum(d.getDate())}`;
+}
+
+// Returns current Pacific time as "YYYY-MM-DD HH:MM" string for tide filtering.
+// Handles PDT (UTC-7) and PST (UTC-8) automatically via Intl.
+function getCurrentPacificTimeStr() {
+  const d = new Date();
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: "America/Los_Angeles",
+    year: "numeric", month: "2-digit", day: "2-digit",
+    hour: "2-digit", minute: "2-digit", hour12: false,
+  }).formatToParts(d).reduce((acc, p) => { acc[p.type] = p.value; return acc; }, {});
+  // Normalize "24" → "00" (midnight edge case in some locales)
+  const h = parts.hour === "24" ? "00" : parts.hour;
+  return `${parts.year}-${parts.month}-${parts.day} ${h}:${parts.minute}`;
+}
+
+// NOAA returns tide times as "YYYY-MM-DD HH:MM" in local time.
+// Converts to 12-hour format for display.
+function fmtNoaaTime(t) {
+  const parts = t.split(" ");
+  if (parts.length < 2) return t;
+  const [h, m] = parts[1].split(":").map(Number);
+  const ampm = h >= 12 ? "PM" : "AM";
+  const h12 = h % 12 || 12;
+  return `${h12}:${padNum(m)} ${ampm}`;
+}
+
 // ============================================================
 // Surfline fetchers
 // ============================================================
 
-async function getSurflineSpotId(query) {
-  const url = `${SURFLINE_BASE}/search/site?q=${encodeURIComponent(query)}&querySize=5&suggestionSize=0&accesstoken=${SURFLINE_TOKEN}`;
-  const res = await fetch(url, { headers: FETCH_HEADERS });
-  if (!res.ok) throw new Error(`Surfline search HTTP ${res.status}`);
-  const data = await res.json();
-  const hits = data?.hits?.hits;
+// Live surf endpoint — returns current spot-specific surf height and size label.
+// This is what Surfline uniquely does well: spot-specific surf height modeling.
+// Units: FT (as confirmed in DevTools capture).
+async function getSurflineLiveSurf(spotId, token) {
+  const url = `${SURFLINE_BASE}/kbyg/spots/live/surf?spotId=${spotId}&units%5BwaveHeight%5D=FT&accesstoken=${token}`;
+  const res = await fetch(url, { headers: SURFLINE_HEADERS });
+  if (!res.ok) throw new Error(`Surfline ${res.status}`);
+  const json = await res.json();
+  // data.surf may be a single object or an array depending on endpoint version
+  let surf = json?.data?.surf;
+  if (Array.isArray(surf)) surf = surf[0];
+  if (!surf) throw new Error("No surf data in response");
+  return {
+    minFt:         surf.min         ?? "?",
+    maxFt:         surf.max         ?? "?",
+    plus:          surf.plus        === true,
+    humanRelation: typeof surf.humanRelation === "string" ? surf.humanRelation : "",
+  };
+}
+
+// Search endpoint — used when user types a spot name instead of selecting from list.
+async function surflineSearch(query, token) {
+  const url = `${SURFLINE_BASE}/search/site?q=${encodeURIComponent(query)}&querySize=5&suggestionSize=0&accesstoken=${token}`;
+  const res = await fetch(url, { headers: SURFLINE_HEADERS });
+  if (!res.ok) throw new Error(`Surfline search ${res.status}`);
+  const json = await res.json();
+  const hits = json?.hits?.hits;
   if (!hits || hits.length === 0) throw new Error("No results found for that spot name.");
-  // Prefer spots (not subregions/regions)
-  const spot = hits.find(h => h._source?.type === "spot") || hits[0];
-  return { spotId: spot._source._id || spot._id, name: spot._source.name };
-}
-
-async function getSurflineWave(spotId) {
-  const url = `${SURFLINE_BASE}/kbyg/spots/forecasts/wave?spotId=${spotId}&days=1&intervalHours=1&accesstoken=${SURFLINE_TOKEN}`;
-  const res = await fetch(url, { headers: FETCH_HEADERS });
-  if (!res.ok) throw new Error(`Surfline wave HTTP ${res.status}`);
-  return res.json();
-}
-
-async function getSurflineWind(spotId) {
-  const url = `${SURFLINE_BASE}/kbyg/spots/forecasts/wind?spotId=${spotId}&days=1&intervalHours=1&accesstoken=${SURFLINE_TOKEN}`;
-  const res = await fetch(url, { headers: FETCH_HEADERS });
-  if (!res.ok) throw new Error(`Surfline wind HTTP ${res.status}`);
-  return res.json();
-}
-
-async function getSurflineTides(spotId) {
-  const url = `${SURFLINE_BASE}/kbyg/spots/forecasts/tides?spotId=${spotId}&days=2&accesstoken=${SURFLINE_TOKEN}`;
-  const res = await fetch(url, { headers: FETCH_HEADERS });
-  if (!res.ok) throw new Error(`Surfline tides HTTP ${res.status}`);
-  return res.json();
+  const hit = hits.find(h => h._source?.type === "spot") || hits[0];
+  return {
+    spotId: hit._source?._id || hit._id,
+    name:   hit._source?.name || query,
+  };
 }
 
 // ============================================================
-// NOAA fetcher — water temperature
+// Open-Meteo fetchers
 // ============================================================
 
+// Marine API — swell height, period, direction.
+// Returns wave heights in meters; converted to feet here.
+// No token required. Global coverage via model grid (no buoy gaps).
+async function getOpenMeteoMarine(lat, lon) {
+  const vars = "swell_wave_height,swell_wave_period,swell_wave_direction";
+  const url  = `${MARINE_BASE}?latitude=${lat}&longitude=${lon}&current=${vars}`;
+  const res  = await fetch(url);
+  if (!res.ok) throw new Error(`Open-Meteo Marine ${res.status}`);
+  const json = await res.json();
+  const c    = json?.current;
+  if (!c) throw new Error("No marine data in response");
+  // Convert meters → feet for swell height
+  const heightFt = c.swell_wave_height != null
+    ? (c.swell_wave_height * 3.28084).toFixed(1)
+    : "?";
+  return {
+    swellHeight: heightFt,
+    swellPeriod: c.swell_wave_period    != null ? Math.round(c.swell_wave_period)    : "?",
+    swellDir:    c.swell_wave_direction != null ? degToCompass(c.swell_wave_direction) : "?",
+  };
+}
+
+// Forecast API — surface wind speed, direction, gusts.
+// wind_speed_unit=mph requests mph units natively.
+async function getOpenMeteoWind(lat, lon) {
+  const vars = "wind_speed_10m,wind_direction_10m,wind_gusts_10m";
+  const url  = `${WEATHER_BASE}?latitude=${lat}&longitude=${lon}&current=${vars}&wind_speed_unit=mph`;
+  const res  = await fetch(url);
+  if (!res.ok) throw new Error(`Open-Meteo Wind ${res.status}`);
+  const json = await res.json();
+  const c    = json?.current;
+  if (!c) throw new Error("No wind data in response");
+  return {
+    speed: c.wind_speed_10m     != null ? Math.round(c.wind_speed_10m)       : "?",
+    dir:   c.wind_direction_10m != null ? degToCompass(c.wind_direction_10m)  : "?",
+    gust:  c.wind_gusts_10m     != null ? Math.round(c.wind_gusts_10m)        : null,
+  };
+}
+
+// ============================================================
+// NOAA CO-OPS fetchers
+// ============================================================
+
+// Most recent hourly water temperature reading at nearest NOAA station.
 async function getNoaaWaterTemp(stationId) {
-  const now = new Date();
-  const pad = n => String(n).padStart(2, "0");
-  const dateStr = `${now.getFullYear()}${pad(now.getMonth()+1)}${pad(now.getDate())}`;
-  const url = `${NOAA_BASE}?begin_date=${dateStr}&end_date=${dateStr}&station=${stationId}&product=water_temperature&datum=MLLW&time_zone=lst_ldt&interval=h&units=english&application=surf_watch&format=json`;
-  const res = await fetch(url);
-  if (!res.ok) throw new Error(`NOAA HTTP ${res.status}`);
-  const data = await res.json();
-  const readings = data?.data;
+  const now     = new Date();
+  const dateStr = fmtDateStr(now);
+  const url = `${NOAA_BASE}?begin_date=${dateStr}&end_date=${dateStr}` +
+    `&station=${stationId}&product=water_temperature&datum=MLLW` +
+    `&time_zone=lst_ldt&interval=h&units=english&application=surf_watch&format=json`;
+  const res  = await fetch(url);
+  if (!res.ok) throw new Error(`NOAA temp ${res.status}`);
+  const json = await res.json();
+  const readings = json?.data;
   if (!readings || readings.length === 0) return null;
-  // Most recent non-null reading
+  // Walk back from latest to find most recent non-null reading
   for (let i = readings.length - 1; i >= 0; i--) {
     if (readings[i].v && readings[i].v !== "") return parseFloat(readings[i].v);
   }
   return null;
 }
 
-// ============================================================
-// Data parsers
-// ============================================================
-
-function parseWave(waveData) {
-  const waves = waveData?.data?.wave;
-  if (!waves || waves.length === 0) return null;
-  // Use current/nearest entry
-  const now = Date.now() / 1000;
-  const entry = waves.reduce((prev, cur) =>
-    Math.abs(cur.timestamp - now) < Math.abs(prev.timestamp - now) ? cur : prev
-  );
-  const surf = entry.surf;
-  const swells = entry.swells?.filter(s => s.height > 0) || [];
-  const dominant = swells[0] || null;
-  return {
-    minFt: surf?.min ?? "?",
-    maxFt: surf?.max ?? "?",
-    humanRelation: surf?.humanRelation ?? "",
-    swellHeight: dominant ? dominant.height.toFixed(1) : "?",
-    swellPeriod: dominant ? dominant.period : "?",
-    swellDirection: dominant ? degToCompass(dominant.direction) : "?",
-    swellDirectionDeg: dominant ? dominant.direction : null,
-  };
-}
-
-function parseWind(windData) {
-  const winds = windData?.data?.wind;
-  if (!winds || winds.length === 0) return null;
-  const now = Date.now() / 1000;
-  const entry = winds.reduce((prev, cur) =>
-    Math.abs(cur.timestamp - now) < Math.abs(prev.timestamp - now) ? cur : prev
-  );
-  return {
-    speed: entry.speed ?? "?",
-    direction: degToCompass(entry.direction),
-    directionDeg: entry.direction,
-    gust: entry.gust ?? null,
-  };
-}
-
-function parseTides(tideData) {
-  const tides = tideData?.data?.tides;
-  if (!tides || tides.length === 0) return [];
-  const now = Date.now() / 1000;
-  // Filter to HIGH/LOW only, future entries, next 4
-  return tides
-    .filter(t => (t.type === "HIGH" || t.type === "LOW") && t.timestamp >= now)
+// Next 4 hi/lo tide predictions for today + tomorrow.
+// Times returned by NOAA are already in local Pacific time (time_zone=lst_ldt).
+async function getNoaaTides(stationId) {
+  const now      = new Date();
+  const tomorrow = new Date(now);
+  tomorrow.setDate(tomorrow.getDate() + 1);
+  const url = `${NOAA_BASE}?begin_date=${fmtDateStr(now)}&end_date=${fmtDateStr(tomorrow)}` +
+    `&station=${stationId}&product=predictions&datum=MLLW` +
+    `&time_zone=lst_ldt&interval=hilo&units=english&application=surf_watch&format=json`;
+  const res  = await fetch(url);
+  if (!res.ok) throw new Error(`NOAA tides ${res.status}`);
+  const json = await res.json();
+  const preds = json?.predictions;
+  if (!preds || preds.length === 0) return [];
+  // Filter to future tides using Pacific time string comparison
+  // NOAA "YYYY-MM-DD HH:MM" format is lexicographically sortable
+  const nowPacific = getCurrentPacificTimeStr();
+  return preds
+    .filter(p => p.t >= nowPacific)
     .slice(0, 4)
-    .map(t => ({
-      type: t.type,
-      height: t.height?.toFixed(1) ?? "?",
-      time: fmtTime(t.timestamp),
+    .map(p => ({
+      type:   p.type === "H" ? "HIGH" : "LOW",
+      height: parseFloat(p.v).toFixed(1),
+      time:   fmtNoaaTime(p.t),
     }));
 }
 
 // ============================================================
-// HTML renderer
+// Shared CSS style strings (inlined for Watch compatibility)
 // ============================================================
 
-function renderHTML(spotName, wave, wind, tides, waterTempF, error) {
-  const wrapStyle = `font-family:sans-serif;font-size:13px;color:#e0e0e0;background:#111;padding:8px;max-width:340px;`;
-  const headStyle = `font-size:15px;font-weight:bold;color:#fff;margin:0 0 6px 0;`;
-  const sectionStyle = `margin-bottom:8px;`;
-  const labelStyle = `color:#aaa;`;
-  const valueStyle = `color:#fff;font-weight:bold;`;
-  const hrStyle = `border:none;border-top:1px solid #333;margin:6px 0;`;
-  const errStyle = `color:#f66;`;
+const S = {
+  wrap:  `font-family:sans-serif;font-size:13px;color:#e0e0e0;background:#111;padding:8px;max-width:340px;`,
+  head:  `font-size:15px;font-weight:bold;color:#fff;margin:0 0 6px 0;`,
+  label: `color:#aaa;`,
+  value: `color:#fff;font-weight:bold;`,
+  hr:    `border:none;border-top:1px solid #333;margin:6px 0;`,
+  row:   `margin-bottom:6px;`,
+  input: `width:100%;box-sizing:border-box;background:#222;color:#fff;border:1px solid #444;padding:5px;font-size:13px;border-radius:3px;margin-bottom:6px;`,
+  btn:   `margin-top:4px;background:#1a6ef5;color:#fff;border:none;padding:7px 14px;font-size:13px;border-radius:3px;width:100%;`,
+  link:  `color:#7af;`,
+  err:   `color:#f66;`,
+};
 
-  if (error) {
-    return `<!DOCTYPE html><html><body style="${wrapStyle}">
-<p style="${headStyle}">${htmlEscape(spotName)}</p>
-<p style="${errStyle}">Error: ${htmlEscape(error)}</p>
-<p><a href="/" style="color:#7af;">← Back</a></p>
-</body></html>`;
-  }
-
-  const tideRows = tides.map(t =>
-    `<tr><td style="${labelStyle}">${t.type}</td><td style="${valueStyle}">${t.height} ft</td><td style="${labelStyle}">${t.time}</td></tr>`
-  ).join("");
-
-  return `<!DOCTYPE html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"></head><body style="${wrapStyle}">
-<p style="${headStyle}">${htmlEscape(spotName)}</p>
-<hr style="${hrStyle}">
-
-<div style="${sectionStyle}">
-  <span style="${labelStyle}">Surf: </span><span style="${valueStyle}">${wave?.minFt}–${wave?.maxFt} ft</span>
-  ${wave?.humanRelation ? `<span style="${labelStyle}"> (${htmlEscape(wave.humanRelation)})</span>` : ""}
-</div>
-
-<div style="${sectionStyle}">
-  <span style="${labelStyle}">Swell: </span><span style="${valueStyle}">${wave?.swellHeight} ft @ ${wave?.swellPeriod}s ${wave?.swellDirection}</span>
-</div>
-
-<div style="${sectionStyle}">
-  <span style="${labelStyle}">Wind: </span><span style="${valueStyle}">${wind?.speed} mph ${wind?.direction}</span>
-  ${wind?.gust ? `<span style="${labelStyle}"> (gust ${wind.gust} mph)</span>` : ""}
-</div>
-
-<div style="${sectionStyle}">
-  <span style="${labelStyle}">Water: </span><span style="${valueStyle}">${waterTempF !== null ? waterTempF + "°F" : "N/A"}</span>
-</div>
-
-<hr style="${hrStyle}">
-
-<div style="${sectionStyle}">
-  <span style="${labelStyle}">Tides:</span><br>
-  <table style="width:100%;border-collapse:collapse;margin-top:3px;">
-    ${tideRows || `<tr><td style="${labelStyle}">No tide data</td></tr>`}
-  </table>
-</div>
-
-<hr style="${hrStyle}">
-<p style="margin:4px 0;"><a href="/" style="color:#7af;">← Back</a></p>
-</body></html>`;
-}
+// ============================================================
+// HTML renderers
+// ============================================================
 
 function renderForm(error) {
-  const spotOptions = CA_SPOTS.map(s =>
+  const opts = CA_SPOTS.map(s =>
     `<option value="${htmlEscape(s.spotId)}">${htmlEscape(s.name)}</option>`
   ).join("\n");
 
-  const wrapStyle = `font-family:sans-serif;font-size:13px;color:#e0e0e0;background:#111;padding:8px;max-width:340px;`;
-  const headStyle = `font-size:15px;font-weight:bold;color:#fff;margin:0 0 8px 0;`;
-  const labelStyle = `color:#aaa;display:block;margin-bottom:3px;`;
-  const inputStyle = `width:100%;box-sizing:border-box;background:#222;color:#fff;border:1px solid #444;padding:5px;font-size:13px;border-radius:3px;`;
-  const btnStyle = `margin-top:8px;background:#1a6ef5;color:#fff;border:none;padding:7px 14px;font-size:13px;border-radius:3px;width:100%;`;
-  const errStyle = `color:#f66;margin-bottom:6px;`;
-
-  return `<!DOCTYPE html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"></head><body style="${wrapStyle}">
-<p style="${headStyle}">Surf Conditions</p>
-${error ? `<p style="${errStyle}">${htmlEscape(error)}</p>` : ""}
+  return `<!DOCTYPE html>
+<html>
+<head><meta name="viewport" content="width=device-width,initial-scale=1"></head>
+<body style="${S.wrap}">
+<p style="${S.head}">Surf Watch</p>
+${error ? `<p style="${S.err}">${htmlEscape(error)}</p>` : ""}
 <form method="GET" action="/forecast">
-  <label style="${labelStyle}">CA Spot</label>
-  <select name="spotId" style="${inputStyle}">
-    <option value="">-- Select a spot --</option>
-    ${spotOptions}
+
+  <label style="${S.label}">Select spot</label><br>
+  <select name="spotId" style="${S.input}">
+    <option value="">-- Choose --</option>
+    ${opts}
   </select>
 
-  <label style="${labelStyle};margin-top:8px;">Or enter spot name</label>
-  <input type="text" name="spotName" placeholder="e.g. Blacks Beach" style="${inputStyle}">
+  <label style="${S.label}">Or search by name</label><br>
+  <input type="text" name="spotName" placeholder="e.g. Swamis" style="${S.input}">
 
-  <input type="submit" value="Get Conditions" style="${btnStyle}">
+  <details style="margin-bottom:6px;">
+    <summary style="${S.label};cursor:pointer;">Advanced</summary>
+    <div style="margin-top:6px;">
+      <label style="${S.label}">Surfline spot ID</label><br>
+      <span style="${S.label};font-size:11px;">Surf data only — swell, wind, water temp, tides: N/A</span><br>
+      <input type="text" name="rawSpotId" placeholder="e.g. 5842041f4e65fad6a770888a" style="${S.input}">
+    </div>
+  </details>
+
+  <input type="submit" value="Submit" style="${S.btn}">
 </form>
-</body></html>`;
+</body>
+</html>`;
+}
+
+function renderConditions(name, surf, marine, wind, waterTempF, tides) {
+  // Surf row
+  const surfSizeStr = surf
+    ? `${surf.minFt}–${surf.maxFt}${surf.plus ? "+" : ""} ft`
+    : "N/A";
+  const surfRelationStr = surf?.humanRelation
+    ? ` <span style="${S.label}">(${htmlEscape(surf.humanRelation)})</span>`
+    : "";
+
+  // Swell row
+  const marineStr = marine
+    ? `${marine.swellHeight} ft @ ${marine.swellPeriod}s ${marine.swellDir}`
+    : "N/A";
+
+  // Wind row
+  const windStr = wind
+    ? `${wind.speed} mph ${wind.dir}${wind.gust != null ? ` <span style="${S.label}">(gust ${wind.gust} mph)</span>` : ""}`
+    : "N/A";
+
+  // Water temp row
+  const tempStr = waterTempF !== null ? `${waterTempF}°F` : "N/A";
+
+  // Tide rows
+  const tideRows = tides.length
+    ? tides.map(t =>
+        `<tr>
+          <td style="${S.label}">${t.type}</td>
+          <td style="${S.value};padding:0 8px;">${t.height} ft</td>
+          <td style="${S.label}">${htmlEscape(t.time)}</td>
+        </tr>`
+      ).join("")
+    : `<tr><td style="${S.label}" colspan="3">N/A</td></tr>`;
+
+  return `<!DOCTYPE html>
+<html>
+<head><meta name="viewport" content="width=device-width,initial-scale=1"></head>
+<body style="${S.wrap}">
+<p style="${S.head}">${htmlEscape(name)}</p>
+<hr style="${S.hr}">
+
+<div style="${S.row}">
+  <span style="${S.label}">Surf: </span>
+  <span style="${S.value}">${surfSizeStr}</span>${surfRelationStr}
+</div>
+
+<div style="${S.row}">
+  <span style="${S.label}">Swell: </span>
+  <span style="${S.value}">${marineStr}</span>
+</div>
+
+<div style="${S.row}">
+  <span style="${S.label}">Wind: </span>
+  <span style="${S.value}">${windStr}</span>
+</div>
+
+<div style="${S.row}">
+  <span style="${S.label}">Water: </span>
+  <span style="${S.value}">${tempStr}</span>
+</div>
+
+<hr style="${S.hr}">
+
+<div style="${S.row}">
+  <span style="${S.label}">Tides:</span>
+  <table style="width:100%;border-collapse:collapse;margin-top:3px;">
+    ${tideRows}
+  </table>
+</div>
+
+<hr style="${S.hr}">
+<p style="margin:4px 0;"><a href="/" style="${S.link}">← Back</a></p>
+</body>
+</html>`;
 }
 
 // ============================================================
-// Request router
+// Request routing
 // ============================================================
 
-async function handleForecast(url) {
-  const params = url.searchParams;
-  const spotId = params.get("spotId");
-  const spotName = params.get("spotName")?.trim();
+async function handleForecast(url, env) {
+  const p         = url.searchParams;
+  const spotId    = p.get("spotId")?.trim()    || "";
+  const spotName  = p.get("spotName")?.trim()  || "";
+  const rawSpotId = p.get("rawSpotId")?.trim() || "";
+
+  const token = env.SURFLINE_TOKEN;
 
   let resolvedSpotId = null;
-  let resolvedName = "";
-  let noaaStationId = "9410230"; // default: San Diego
+  let resolvedName   = "Unknown Spot";
+  let lat            = null;
+  let lon            = null;
+  let noaaStationId  = null;
 
-  if (spotId) {
-    // Dropdown selection — look up in CA_SPOTS for name + NOAA station
+  if (rawSpotId) {
+    // Advanced: manual spot ID entry.
+    // Hits Surfline live endpoint directly. No lat/lon → no Open-Meteo.
+    // No noaaStationId → no NOAA temp or tides. All non-Surfline fields → N/A.
+    resolvedSpotId = rawSpotId;
+    resolvedName   = "Custom Spot";
+  } else if (spotId) {
     const found = CA_SPOTS.find(s => s.spotId === spotId);
-    resolvedSpotId = spotId;
-    resolvedName = found ? found.name : "Unknown Spot";
-    noaaStationId = found ? found.noaaStationId : "9410230";
+    if (!found) return Response.redirect("/", 302);
+    resolvedSpotId = found.spotId;
+    resolvedName   = found.name;
+    lat            = found.lat;
+    lon            = found.lon;
+    noaaStationId  = found.noaaStationId;
   } else if (spotName) {
-    // Text search via Surfline search API
+    // Free-text search via Surfline search API.
+    // Returns surf height only — no lat/lon or NOAA station for search results.
     try {
-      const result = await getSurflineSpotId(spotName);
+      const result   = await surflineSearch(spotName, token);
       resolvedSpotId = result.spotId;
-      resolvedName = result.name;
-      // NOAA station: default to nearest by rough geography — use San Diego as fallback
-      noaaStationId = "9410230";
+      resolvedName   = result.name;
     } catch (e) {
       return new Response(renderForm(e.message), {
-        headers: { "Content-Type": "text/html;charset=UTF-8" }
+        headers: { "Content-Type": "text/html;charset=UTF-8" },
       });
     }
   } else {
     return Response.redirect("/", 302);
   }
 
-  // Fetch all data in parallel
-  let wave = null, wind = null, tides = [], waterTempF = null, error = null;
-  try {
-    const [waveData, windData, tideData, temp] = await Promise.allSettled([
-      getSurflineWave(resolvedSpotId),
-      getSurflineWind(resolvedSpotId),
-      getSurflineTides(resolvedSpotId),
-      getNoaaWaterTemp(noaaStationId),
-    ]);
+  // Fire all 5 sources in parallel. Each resolves or rejects independently.
+  // Promise.allSettled guarantees all settle before we render — no partial hangs.
+  const [surfResult, marineResult, windResult, tempResult, tidesResult] = await Promise.allSettled([
+    getSurflineLiveSurf(resolvedSpotId, token),
+    lat !== null ? getOpenMeteoMarine(lat, lon) : Promise.reject(new Error("no coords")),
+    lat !== null ? getOpenMeteoWind(lat, lon)   : Promise.reject(new Error("no coords")),
+    noaaStationId ? getNoaaWaterTemp(noaaStationId) : Promise.reject(new Error("no station")),
+    noaaStationId ? getNoaaTides(noaaStationId)     : Promise.reject(new Error("no station")),
+  ]);
 
-    if (waveData.status === "fulfilled") wave = parseWave(waveData.value);
-    else throw new Error(`Wave data unavailable: ${waveData.reason?.message}`);
-
-    if (windData.status === "fulfilled") wind = parseWind(windData.value);
-    if (tideData.status === "fulfilled") tides = parseTides(tideData.value);
-    if (temp.status === "fulfilled") waterTempF = temp.value;
-
-  } catch (e) {
-    error = e.message;
-  }
+  const surf       = surfResult.status   === "fulfilled" ? surfResult.value   : null;
+  const marine     = marineResult.status === "fulfilled" ? marineResult.value : null;
+  const wind       = windResult.status   === "fulfilled" ? windResult.value   : null;
+  const waterTempF = tempResult.status   === "fulfilled" ? tempResult.value   : null;
+  const tides      = tidesResult.status  === "fulfilled" ? tidesResult.value  : [];
 
   return new Response(
-    renderHTML(resolvedName, wave, wind, tides, waterTempF, error),
+    renderConditions(resolvedName, surf, marine, wind, waterTempF, tides),
     { headers: { "Content-Type": "text/html;charset=UTF-8" } }
   );
 }
 
 // ============================================================
-// Worker entry point
+// Worker entry point — ES module format (export default required)
+// Cloudflare detects ESM automatically from this export.
+// env.SURFLINE_TOKEN is injected at runtime from Dashboard Variables.
 // ============================================================
 
 export default {
-  async fetch(request) {
+  async fetch(request, env) {
     const url = new URL(request.url);
 
     if (url.pathname === "/" || url.pathname === "") {
       return new Response(renderForm(null), {
-        headers: { "Content-Type": "text/html;charset=UTF-8" }
+        headers: { "Content-Type": "text/html;charset=UTF-8" },
       });
     }
 
     if (url.pathname === "/forecast") {
-      return handleForecast(url);
+      return handleForecast(url, env);
     }
 
     return new Response("Not found", { status: 404 });
-  }
+  },
 };
